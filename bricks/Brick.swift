@@ -40,6 +40,7 @@ final class WorldState: ObservableObject {
     @Published private(set) var cellSize: Float = 0.1
     @Published private(set) var canUndo = false
     @Published private(set) var canRedo = false
+    @Published private(set) var modelRevision = 0
 
     private var occupied: [SIMD3<Int>: UUID] = [:]
     private var undoStack: [WorldDocument] = []
@@ -198,6 +199,12 @@ final class WorldState: ObservableObject {
     func brick(atGrid grid: SIMD3<Int>) -> Brick? {
         guard let id = occupied[grid] else { return nil }
         return bricks[id]
+    }
+
+    func voxelSnapshot() -> [SIMD3<Int>: SIMD3<Float>] {
+        Dictionary(uniqueKeysWithValues: occupied.compactMap { cell, id in
+            bricks[id].map { (cell, $0.color) }
+        })
     }
 
     func beginTransaction() {
@@ -379,6 +386,7 @@ final class WorldState: ObservableObject {
     }
 
     private func publishModelChange() {
+        modelRevision &+= 1
         objectWillChange.send()
         updateHistoryAvailability()
     }

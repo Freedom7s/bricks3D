@@ -37,13 +37,17 @@ struct BricksSceneView: UIViewRepresentable {
         private weak var camera: CameraState?
 
         private let cameraNode = SCNNode()
-        private var renderedBricks: [UUID: Brick] = [:]
+        private typealias ChunkKey = SIMD3<Int>
+        private let chunkSize = 16
+        private var renderedChunks: [ChunkKey: [SIMD3<Int>: SIMD3<Float>]] = [:]
+        private var renderedModelRevision = -1
         private var renderedCellSize: Float?
         private var renderedGridSpacing: Double?
         private var renderedBrickGridStep: Int?
         private var renderedOrigin = SIMD3<Double>(repeating: 0)
         private var previousOrigin = SIMD3<Double>(repeating: .nan)
         private var lastDrawCell: SIMD3<Int>?
+        private var lastDrawScreenPoint: CGPoint?
         private var drawingLayerY: Int?
         private enum TwoFingerMode { case viewTilt, pan }
         private var twoFingerMode: TwoFingerMode?
@@ -124,7 +128,7 @@ struct BricksSceneView: UIViewRepresentable {
             updateFloatingOrigin()
             updateCamera()
             updateGrid(cellSize: world.cellSize)
-            updateBrickNodes(world.bricks, cellSize: world.cellSize)
+            updateChunkNodes(world: world, cellSize: world.cellSize)
             updateSelection(editor.selectedID)
             view?.setNeedsDisplay()
         }
@@ -234,72 +238,109 @@ struct BricksSceneView: UIViewRepresentable {
             }
         }
 
-        private func updateBrickNodes(_ bricks: [UUID: Brick], cellSize: Float) {
+        private func updateChunkNodes(world: WorldState, cellSize: Float) {
             guard let scene = view?.scene else { return }
-            let gridStep = max(1, Int(((editor?.visibleGridSizeMeters ?? Double(cellSize)) / Double(cellSize)).rounded()))
-            for id in renderedBricks.keys where bricks[id] == nil {
-                scene.rootNode.childNode(withName: nodeName(id), recursively: false)?.removeFromParentNode()
+            let originChanged = previousOrigin != renderedOrigin
+            let cellSizeChanged = renderedCellSize != cellSize
+            guard renderedModelRevision != world.modelRevision || originChanged || cellSizeChanged else {
+                updateChunkMaterialScale(cellSize: cellSize)
+                return
             }
 
-            let originChanged = previousOrigin != renderedOrigin
-            for (id, brick) in bricks where originChanged
-                || renderedBricks[id] != brick
-                || renderedCellSize != cellSize
-                || renderedBrickGridStep != gridStep {
-                scene.rootNode.childNode(withName: nodeName(id), recursively: false)?.removeFromParentNode()
-                scene.rootNode.addChildNode(makeNode(for: brick, cellSize: cellSize, gridStep: gridStep))
+            let voxels = world.voxelSnapshot()
+            var chunks: [ChunkKey: [SIMD3<Int>: SIMD3<Float>]] = [:]
+            for (cell, color) in voxels {
+                chunks[chunkKey(for: cell), default: [:]][cell] = color
             }
-            renderedBricks = bricks
+            let removed = Set(renderedChunks.keys).subtracting(chunks.keys)
+            for key in removed {
+                scene.rootNode.childNode(withName: chunkNodeName(key), recursively: false)?.removeFromParentNode()
+            }
+            for (key, cells) in chunks where originChanged || cellSizeChanged || renderedChunks[key] != cells {
+                scene.rootNode.childNode(withName: chunkNodeName(key), recursively: false)?.removeFromParentNode()
+                if let node = makeChunkNode(key: key, cells: cells, allVoxels: voxels, cellSize: cellSize) {
+                    scene.rootNode.addChildNode(node)
+                }
+            }
+            renderedChunks = chunks
+            renderedModelRevision = world.modelRevision
             renderedCellSize = cellSize
-            renderedBrickGridStep = gridStep
             previousOrigin = renderedOrigin
+            updateChunkMaterialScale(cellSize: cellSize)
         }
 
-        private func makeNode(for brick: Brick, cellSize: Float, gridStep: Int) -> SCNNode {
-            let width = CGFloat(Float(brick.size.x) * cellSize)
-            let height = CGFloat(Float(brick.size.y) * cellSize)
-            let length = CGFloat(Float(brick.size.z) * cellSize)
-            let box = SCNBox(width: width, height: height, length: length, chamferRadius: 0)
-            let xy = brickMaterial(
-                horizontalCells: brick.size.x,
-                verticalCells: brick.size.y,
-                gridStep: gridStep
+        private func makeChunkNode(
+            key: ChunkKey,
+            cells: [SIMD3<Int>: SIMD3<Float>],
+            allVoxels: [SIMD3<Int>: SIMD3<Float>],
+            cellSize: Float
+        ) -> SCNNode? {
+            let directions: [(SIMD3<Int>, SIMD3<Float>, [SIMD3<Float>])] = [
+                (SIMD3(1, 0, 0), SIMD3(1, 0, 0), [SIMD3(1,0,0), SIMD3(1,1,0), SIMD3(1,1,1), SIMD3(1,0,1)]),
+                (SIMD3(-1, 0, 0), SIMD3(-1, 0, 0), [SIMD3(0,0,1), SIMD3(0,1,1), SIMD3(0,1,0), SIMD3(0,0,0)]),
+                (SIMD3(0, 1, 0), SIMD3(0, 1, 0), [SIMD3(0,1,1), SIMD3(1,1,1), SIMD3(1,1,0), SIMD3(0,1,0)]),
+                (SIMD3(0, -1, 0), SIMD3(0, -1, 0), [SIMD3(0,0,0), SIMD3(1,0,0), SIMD3(1,0,1), SIMD3(0,0,1)]),
+                (SIMD3(0, 0, 1), SIMD3(0, 0, 1), [SIMD3(1,0,1), SIMD3(1,1,1), SIMD3(0,1,1), SIMD3(0,0,1)]),
+                (SIMD3(0, 0, -1), SIMD3(0, 0, -1), [SIMD3(0,0,0), SIMD3(0,1,0), SIMD3(1,1,0), SIMD3(1,0,0)])
+            ]
+            var vertices: [SCNVector3] = []
+            var normals: [SCNVector3] = []
+            var texcoords: [CGPoint] = []
+            var indices: [UInt32] = []
+            for cell in cells.keys {
+                for (neighbor, normal, corners) in directions where allVoxels[cell &+ neighbor] == nil {
+                    let base = UInt32(vertices.count)
+                    for corner in corners {
+                        let p = SIMD3<Float>(Float(cell.x), Float(cell.y), Float(cell.z)) + corner
+                        vertices.append(SCNVector3(p.x * cellSize, p.y * cellSize, p.z * cellSize))
+                        normals.append(SCNVector3(normal.x, normal.y, normal.z))
+                        if normal.x != 0 {
+                            texcoords.append(CGPoint(x: CGFloat(p.z), y: CGFloat(p.y)))
+                        } else if normal.y != 0 {
+                            texcoords.append(CGPoint(x: CGFloat(p.x), y: CGFloat(p.z)))
+                        } else {
+                            texcoords.append(CGPoint(x: CGFloat(p.x), y: CGFloat(p.y)))
+                        }
+                    }
+                    indices.append(contentsOf: [base, base + 1, base + 2, base, base + 2, base + 3])
+                }
+            }
+            guard !indices.isEmpty else { return nil }
+            let geometry = SCNGeometry(
+                sources: [
+                    SCNGeometrySource(vertices: vertices),
+                    SCNGeometrySource(normals: normals),
+                    SCNGeometrySource(textureCoordinates: texcoords)
+                ],
+                elements: [SCNGeometryElement(indices: indices, primitiveType: .triangles)]
             )
-            let zy = brickMaterial(
-                horizontalCells: brick.size.z,
-                verticalCells: brick.size.y,
-                gridStep: gridStep
-            )
-            let xz = brickMaterial(
-                horizontalCells: brick.size.x,
-                verticalCells: brick.size.z,
-                gridStep: gridStep
-            )
-            box.materials = [xy, zy, xy.copy() as! SCNMaterial, zy.copy() as! SCNMaterial, xz, xz.copy() as! SCNMaterial]
-
-            let worldPosition = SIMD3<Double>(
-                (Double(brick.pos.x) + Double(brick.size.x) / 2) * Double(cellSize),
-                (Double(brick.pos.y) + Double(brick.size.y) / 2) * Double(cellSize),
-                (Double(brick.pos.z) + Double(brick.size.z) / 2) * Double(cellSize)
-            )
-            let node = SCNNode(geometry: box)
-            node.name = nodeName(brick.id)
-            node.position = scnVector(worldPosition - renderedOrigin)
+            geometry.materials = [chunkMaterial()]
+            let node = SCNNode(geometry: geometry)
+            node.name = chunkNodeName(key)
+            node.position = scnVector(-renderedOrigin)
             return node
         }
 
-        private func brickMaterial(horizontalCells: Int, verticalCells: Int, gridStep: Int) -> SCNMaterial {
+        private func chunkMaterial() -> SCNMaterial {
             let material = SCNMaterial()
             material.diffuse.contents = brickGridImage
             material.diffuse.wrapS = .repeat
             material.diffuse.wrapT = .repeat
-            material.diffuse.contentsTransform = SCNMatrix4MakeScale(
-                max(1, Float(horizontalCells) / Float(gridStep)),
-                max(1, Float(verticalCells) / Float(gridStep)),
-                1
-            )
+            let step = max(1, renderedBrickGridStep ?? 1)
+            material.diffuse.contentsTransform = SCNMatrix4MakeScale(1 / Float(step), 1 / Float(step), 1)
             material.lightingModel = .lambert
             return material
+        }
+
+        private func updateChunkMaterialScale(cellSize: Float) {
+            guard let scene = view?.scene else { return }
+            let step = max(1, Int(((editor?.visibleGridSizeMeters ?? Double(cellSize)) / Double(cellSize)).rounded()))
+            guard renderedBrickGridStep != step else { return }
+            renderedBrickGridStep = step
+            for key in renderedChunks.keys {
+                scene.rootNode.childNode(withName: chunkNodeName(key), recursively: false)?
+                    .geometry?.firstMaterial?.diffuse.contentsTransform = SCNMatrix4MakeScale(1 / Float(step), 1 / Float(step), 1)
+            }
         }
 
         private func makeBrickGridImage() -> UIImage {
@@ -317,15 +358,8 @@ struct BricksSceneView: UIViewRepresentable {
         }
 
         private func updateSelection(_ selectedID: UUID?) {
-            guard let scene = view?.scene else { return }
-            for id in renderedBricks.keys {
-                let node = scene.rootNode.childNode(withName: nodeName(id), recursively: false)
-                node?.geometry?.materials.forEach {
-                    $0.emission.contents = id == selectedID
-                        ? UIColor.systemYellow.withAlphaComponent(0.4)
-                        : UIColor.clear
-                }
-            }
+            // Chunk geometry contains many model elements, so per-brick highlighting
+            // will move to a lightweight overlay instead of duplicating chunk meshes.
         }
 
         @objc private func onTap(_ recognizer: UITapGestureRecognizer) {
@@ -354,6 +388,7 @@ struct BricksSceneView: UIViewRepresentable {
             case .began:
                 world.beginTransaction()
                 lastDrawCell = nil
+                lastDrawScreenPoint = nil
                 drawingLayerY = nil
                 applyTool(at: recognizer.location(in: view), world: world, beginsStroke: true)
             case .changed:
@@ -362,10 +397,12 @@ struct BricksSceneView: UIViewRepresentable {
                 applyTool(at: recognizer.location(in: view), world: world, beginsStroke: false)
                 world.endTransaction()
                 lastDrawCell = nil
+                lastDrawScreenPoint = nil
                 drawingLayerY = nil
             case .cancelled, .failed:
                 world.cancelTransaction()
                 lastDrawCell = nil
+                lastDrawScreenPoint = nil
                 drawingLayerY = nil
             default:
                 break
@@ -393,9 +430,17 @@ struct BricksSceneView: UIViewRepresentable {
             guard let cell else { return }
             let anchor = quantized(cell: cell, step: step)
             if drawingLayerY == nil { drawingLayerY = anchor.y }
+            if let previous = lastDrawCell {
+                let jump = max(abs(anchor.x - previous.x), abs(anchor.z - previous.z)) / step
+                if jump > 12 {
+                    lastDrawScreenPoint = point
+                    return
+                }
+            }
             let cells = lastDrawCell.map { interpolatedCells(from: $0, to: anchor, step: step) } ?? [anchor]
             draw(cells: cells, in: world)
             lastDrawCell = anchor
+            lastDrawScreenPoint = point
         }
 
         private func draw(cells: [SIMD3<Int>], in world: WorldState) {
@@ -508,10 +553,11 @@ struct BricksSceneView: UIViewRepresentable {
         }
 
         private func brickID(at point: CGPoint) -> UUID? {
-            guard let view else { return nil }
+            guard let view, let world else { return nil }
             for hit in view.hitTest(point) {
-                guard let name = hit.node.name, name.hasPrefix("brick_") else { continue }
-                return UUID(uuidString: String(name.dropFirst("brick_".count)))
+                guard isModelNode(hit.node) else { continue }
+                let offset = hit.worldNormal * -(world.cellSize * 0.05)
+                return world.brick(atGrid: worldCell(from: hit.worldCoordinates + offset))?.id
             }
             return nil
         }
@@ -519,7 +565,7 @@ struct BricksSceneView: UIViewRepresentable {
         private func placementCell(at point: CGPoint) -> SIMD3<Int>? {
             guard let view, let world else { return nil }
             for hit in view.hitTest(point) {
-                if hit.node.name?.hasPrefix("brick_") == true {
+                if isModelNode(hit.node) {
                     let offset = hit.worldNormal * (world.cellSize * 0.05)
                     return worldCell(from: hit.worldCoordinates + offset)
                 }
@@ -532,7 +578,7 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func eraserCell(at point: CGPoint) -> SIMD3<Int>? {
             guard let view, let world else { return nil }
-            for hit in view.hitTest(point) where hit.node.name?.hasPrefix("brick_") == true {
+            for hit in view.hitTest(point) where isModelNode(hit.node) {
                 let offset = hit.worldNormal * (world.cellSize * 0.05)
                 return worldCell(from: hit.worldCoordinates - offset)
             }
@@ -564,6 +610,22 @@ struct BricksSceneView: UIViewRepresentable {
             SCNVector3(Float(value.x), Float(value.y), Float(value.z))
         }
 
-        private func nodeName(_ id: UUID) -> String { "brick_\(id.uuidString)" }
+        private func isModelNode(_ node: SCNNode) -> Bool {
+            node.name?.hasPrefix("chunk_") == true
+        }
+
+        private func chunkKey(for cell: SIMD3<Int>) -> ChunkKey {
+            SIMD3(floorDiv(cell.x, chunkSize), floorDiv(cell.y, chunkSize), floorDiv(cell.z, chunkSize))
+        }
+
+        private func floorDiv(_ value: Int, _ divisor: Int) -> Int {
+            let quotient = value / divisor
+            let remainder = value % divisor
+            return remainder < 0 ? quotient - 1 : quotient
+        }
+
+        private func chunkNodeName(_ key: ChunkKey) -> String {
+            "chunk_\(key.x)_\(key.y)_\(key.z)"
+        }
     }
 }
