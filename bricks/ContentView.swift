@@ -65,9 +65,9 @@ struct ContentView: View {
 
             Menu {
                 Button {
-                    editor.brushSizeMode = .automatic
+                    editor.gridScaleMode = .automatic
                 } label: {
-                    Label("自动", systemImage: editor.brushSizeMode == .automatic ? "checkmark" : "grid")
+                    Label("自动", systemImage: editor.gridScaleMode == .automatic ? "checkmark" : "grid")
                 }
                 Divider()
                 ForEach(WorldState.supportedCellSizes, id: \.self) { size in
@@ -75,11 +75,11 @@ struct ContentView: View {
                         if size < world.cellSize {
                             _ = world.setCellSize(size, recordsHistory: false)
                         }
-                        editor.brushSizeMode = .fixed(Double(size))
+                        editor.gridScaleMode = .fixed(Double(size))
                     } label: {
                         Label(
                             gridLabel(size),
-                            systemImage: editor.brushSizeMode == .fixed(Double(size)) ? "checkmark" : "square.grid.3x3"
+                            systemImage: editor.gridScaleMode == .fixed(Double(size)) ? "checkmark" : "square.grid.3x3"
                         )
                     }
                 }
@@ -109,6 +109,20 @@ struct ContentView: View {
                 Label(
                     editor.drawingTool == .brush ? "画笔" : "橡皮",
                     systemImage: editor.drawingTool == .brush ? "pencil.tip" : "eraser.fill"
+                )
+            }
+            .buttonStyle(.bordered)
+            Button {
+                editor.isBrushSizeLocked.toggle()
+                if editor.isBrushSizeLocked {
+                    editor.lockedBrushSizeMeters = editor.visibleGridSizeMeters
+                }
+            } label: {
+                Label(
+                    editor.isBrushSizeLocked
+                        ? "方块 \(gridLabel(Float(editor.lockedBrushSizeMeters)))"
+                        : "方块跟随网格",
+                    systemImage: editor.isBrushSizeLocked ? "lock.fill" : "lock.open"
                 )
             }
             .buttonStyle(.bordered)
@@ -145,7 +159,7 @@ struct ContentView: View {
     }
 
     private var sizeMenuLabel: String {
-        switch editor.brushSizeMode {
+        switch editor.gridScaleMode {
         case .automatic:
             return "自动 · \(gridLabel(Float(editor.visibleGridSizeMeters)))"
         case let .fixed(size):

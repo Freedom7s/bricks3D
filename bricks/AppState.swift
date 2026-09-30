@@ -19,7 +19,7 @@ final class EditorState: ObservableObject {
         case eraser
     }
 
-    enum BrushSizeMode: Equatable {
+    enum GridScaleMode: Equatable {
         case automatic
         case fixed(Double)
 
@@ -32,7 +32,9 @@ final class EditorState: ObservableObject {
     @Published var interactionMode: InteractionMode = .camera
     @Published var selectedID: UUID?
     @Published var drawingTool: DrawingTool = .brush
-    @Published var brushSizeMode: BrushSizeMode = .automatic
+    @Published var gridScaleMode: GridScaleMode = .automatic
+    @Published var isBrushSizeLocked = true
+    @Published var lockedBrushSizeMeters: Double = 0.1
     @Published var visibleGridSizeMeters: Double = 0.1
 }
 

@@ -157,7 +157,7 @@ struct BricksSceneView: UIViewRepresentable {
             guard let scene = view?.scene, let camera else { return }
             let spacing = displayGridSpacing(radius: camera.radius, minimum: Double(cellSize))
             let effectiveSpacing: Double
-            if let fixedSize = editor?.brushSizeMode.fixedSize {
+            if let fixedSize = editor?.gridScaleMode.fixedSize {
                 effectiveSpacing = fixedSize
             } else {
                 effectiveSpacing = spacing
@@ -423,9 +423,9 @@ struct BricksSceneView: UIViewRepresentable {
         }
 
         private func brushStep(world: WorldState) -> Int {
-            let size = editor?.brushSizeMode.fixedSize
-                ?? editor?.visibleGridSizeMeters
-                ?? Double(world.cellSize)
+            let size = editor?.isBrushSizeLocked == true
+                ? editor?.lockedBrushSizeMeters ?? Double(world.cellSize)
+                : editor?.visibleGridSizeMeters ?? Double(world.cellSize)
             return max(1, Int((size / Double(world.cellSize)).rounded()))
         }
 
@@ -454,8 +454,10 @@ struct BricksSceneView: UIViewRepresentable {
             recognizer.setTranslation(.zero, in: view)
             switch twoFingerMode {
             case .viewTilt:
-                camera.pan(screenX: Double(delta.x), screenY: 0)
-                camera.orbit(horizontal: 0, vertical: Double(delta.y) * 0.005)
+                camera.orbit(
+                    horizontal: Double(delta.x) * 0.005,
+                    vertical: Double(delta.y) * 0.005
+                )
             case .pan:
                 camera.pan(screenX: Double(delta.x), screenY: Double(delta.y))
             case nil:
@@ -502,7 +504,7 @@ struct BricksSceneView: UIViewRepresentable {
                     return worldCell(from: hit.worldCoordinates + offset)
                 }
                 if hit.node.name == "ground" {
-                    return worldCell(from: hit.worldCoordinates)
+                    return gridPosition(at: point, planeY: 0)
                 }
             }
             return gridPosition(at: point, planeY: 0)
@@ -533,7 +535,7 @@ struct BricksSceneView: UIViewRepresentable {
             guard let local = intersectPlaneY(ray: ray, y: planeY) else { return nil }
             return SIMD3(
                 Int(floor((Double(local.x) + renderedOrigin.x) / Double(world.cellSize))),
-                Int(floor((Double(local.y) + renderedOrigin.y) / Double(world.cellSize))),
+                Int(round((Double(planeY) + renderedOrigin.y) / Double(world.cellSize))),
                 Int(floor((Double(local.z) + renderedOrigin.z) / Double(world.cellSize)))
             )
         }
