@@ -1,320 +1,311 @@
-import SwiftUI
 import SceneKit
+import SwiftUI
 import UIKit
 
 struct BricksSceneView: UIViewRepresentable {
     @ObservedObject var world: WorldState
-    var defaultSize: SIMD3<Int> = SIMD3(2,1,4)
-    var defaultColor: SIMD3<Float> = SIMD3(0.9,0.4,0.2)
-
-    func makeUIView(context: Context) -> SCNView {
-        let v = SCNView()
-        v.scene = SCNScene()
-        v.rendersContinuously = true
-        v.antialiasingMode = .multisampling4X
-        v.autoenablesDefaultLighting = false
-        v.allowsCameraControl = false
-
-        // 手势
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onTap(_:)))
-        v.addGestureRecognizer(tap)
-
-        let long = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onLongPress(_:)))
-        long.minimumPressDuration = 0.35
-        v.addGestureRecognizer(long)
-
-        // 单指编辑
-        let pan1 = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onPanOneFinger(_:)))
-        pan1.minimumNumberOfTouches = 1
-        pan1.maximumNumberOfTouches = 1
-        v.addGestureRecognizer(pan1)
-
-        // 双指相机旋转
-        let pan2 = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onPanTwoFingers(_:)))
-        pan2.minimumNumberOfTouches = 2
-        v.addGestureRecognizer(pan2)
-
-        // 捏合缩放
-        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.onPinch(_:)))
-        v.addGestureRecognizer(pinch)
-
-        // 注入
-        context.coordinator.view = v
-        context.coordinator.world = world
-        context.coordinator.defaultSize = defaultSize
-        context.coordinator.defaultColor = defaultColor
-
-        context.coordinator.setupCameraAndLights()
-        context.coordinator.buildGroundGrid()
-        return v
-    }
-
-    func updateUIView(_ uiView: SCNView, context: Context) {
-        context.coordinator.defaultSize = defaultSize
-        context.coordinator.defaultColor = defaultColor
-        context.coordinator.refreshBricks()
-    }
+    @ObservedObject var editor: EditorState
+    @ObservedObject var camera: CameraState
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    // MARK: - Coordinator
-    final class Coordinator: NSObject {
-        weak var view: SCNView?
-        weak var world: WorldState?
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView()
+        view.scene = SCNScene()
+        view.rendersContinuously = true
+        view.antialiasingMode = .multisampling4X
+        view.autoenablesDefaultLighting = false
+        view.allowsCameraControl = false
+        view.backgroundColor = UIColor.systemBackground
 
-        // 从外层传入
-        var defaultSize: SIMD3<Int> = SIMD3(2,1,4)
-        var defaultColor: SIMD3<Float> = SIMD3(0.9,0.4,0.2)
+        context.coordinator.connect(view: view, world: world, editor: editor, camera: camera)
+        context.coordinator.installScene()
+        context.coordinator.installGestures()
+        return view
+    }
 
-        // 选中状态
-        var selectedID: UUID?
-        enum EditMode { case none, moving }
-        var mode: EditMode = .none
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        context.coordinator.connect(view: uiView, world: world, editor: editor, camera: camera)
+        context.coordinator.render()
+    }
 
-        // 轨道相机
-        var orbitCenter = SCNVector3(0,0,0)
-        var orbitRadius: Float = 2.5
-        var orbitTheta: Float = Float.pi/6
-        var orbitPhi:   Float = Float.pi/4
-        private var lastPanPoint: CGPoint?
-        private let groundY: Float = 0
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        private weak var view: SCNView?
+        private weak var world: WorldState?
+        private weak var editor: EditorState?
+        private weak var camera: CameraState?
 
-        func setupCameraAndLights() {
+        private let cameraNode = SCNNode()
+        private var renderedBricks: [UUID: Brick] = [:]
+        private var renderedCellSize: Float?
+        private var renderedBrickCellSize: Float?
+        private var movingID: UUID?
+        private var dragOffset = SIMD2<Int>(repeating: 0)
+
+        func connect(view: SCNView, world: WorldState, editor: EditorState, camera: CameraState) {
+            self.view = view
+            self.world = world
+            self.editor = editor
+            self.camera = camera
+        }
+
+        func installScene() {
             guard let scene = view?.scene else { return }
-            let cam = SCNNode()
-            cam.camera = SCNCamera()
-            cam.camera?.zNear = 0.01
-            cam.camera?.zFar  = 200
-            scene.rootNode.addChildNode(cam)
 
-            let amb = SCNNode()
-            amb.light = SCNLight()
-            amb.light?.type = .ambient
-            amb.light?.intensity = 200
-            scene.rootNode.addChildNode(amb)
+            cameraNode.name = "camera"
+            cameraNode.camera = SCNCamera()
+            cameraNode.camera?.zNear = 0.005
+            cameraNode.camera?.zFar = 500
+            scene.rootNode.addChildNode(cameraNode)
 
-            let dir = SCNNode()
-            dir.light = SCNLight()
-            dir.light?.type = .directional
-            dir.eulerAngles = SCNVector3(-Float.pi/4, Float.pi/4, 0)
-            dir.light?.intensity = 900
-            scene.rootNode.addChildNode(dir)
+            let ambient = SCNNode()
+            ambient.light = SCNLight()
+            ambient.light?.type = .ambient
+            ambient.light?.intensity = 260
+            scene.rootNode.addChildNode(ambient)
 
-            updateCameraPosition()
+            let directional = SCNNode()
+            directional.light = SCNLight()
+            directional.light?.type = .directional
+            directional.light?.intensity = 900
+            directional.eulerAngles = SCNVector3(-Float.pi / 4, Float.pi / 4, 0)
+            scene.rootNode.addChildNode(directional)
+
+            render()
         }
 
-        func updateCameraPosition() {
-            guard let cam = view?.scene?.rootNode.childNodes.first(where: { $0.camera != nil }) else { return }
-            let x = orbitCenter.x + orbitRadius * sin(orbitTheta) * cos(orbitPhi)
-            let y = orbitCenter.y + orbitRadius * cos(orbitTheta)
-            let z = orbitCenter.z + orbitRadius * sin(orbitTheta) * sin(orbitPhi)
-            cam.position = SCNVector3(x, y, z)
-            cam.look(at: orbitCenter)
+        func installGestures() {
+            guard let view else { return }
+
+            let tap = UITapGestureRecognizer(target: self, action: #selector(onTap(_:)))
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(onLongPress(_:)))
+            longPress.minimumPressDuration = 0.4
+            tap.require(toFail: longPress)
+
+            let oneFingerPan = UIPanGestureRecognizer(target: self, action: #selector(onOneFingerPan(_:)))
+            oneFingerPan.minimumNumberOfTouches = 1
+            oneFingerPan.maximumNumberOfTouches = 1
+
+            let twoFingerPan = UIPanGestureRecognizer(target: self, action: #selector(onTwoFingerPan(_:)))
+            twoFingerPan.minimumNumberOfTouches = 2
+            twoFingerPan.maximumNumberOfTouches = 2
+            twoFingerPan.delegate = self
+
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(onPinch(_:)))
+            pinch.delegate = self
+
+            [tap, longPress, oneFingerPan, twoFingerPan, pinch].forEach(view.addGestureRecognizer)
         }
 
-        func buildGroundGrid() {
-            guard let scene = view?.scene else { return }
-            let plane = SCNPlane(width: 10, height: 10)
-            plane.firstMaterial = gridMaterial()
-            let n = SCNNode(geometry: plane)
-            n.eulerAngles.x = -Float.pi/2
-            n.position = SCNVector3(0, groundY, 0)
-            n.name = "ground"
-            scene.rootNode.addChildNode(n)
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            let pair = [gestureRecognizer, otherGestureRecognizer]
+            return pair.contains { $0 is UIPinchGestureRecognizer }
+                && pair.contains { ($0 as? UIPanGestureRecognizer)?.minimumNumberOfTouches == 2 }
         }
 
-        private func gridMaterial() -> SCNMaterial {
-            let m = SCNMaterial()
-            m.diffuse.contents = gridImage(size: 512, spacing: 16)
-            m.isDoubleSided = true
-            m.lightingModel = .lambert
-            return m
+        func render() {
+            guard let world, let editor else { return }
+            updateCamera()
+            updateGridIfNeeded(cellSize: world.cellSize)
+            updateBrickNodes(world.bricks)
+            updateSelection(editor.selectedID)
         }
 
-        private func gridImage(size: Int, spacing: Int) -> UIImage {
-            UIGraphicsBeginImageContext(CGSize(width: size, height: size))
-            let ctx = UIGraphicsGetCurrentContext()!
-            UIColor(white: 0.95, alpha: 1).setFill()
-            ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
-            UIColor(white: 0.8, alpha: 1).setStroke()
-            ctx.setLineWidth(1)
-            for i in stride(from: 0, to: size, by: spacing) {
-                ctx.move(to: CGPoint(x: i, y: 0)); ctx.addLine(to: CGPoint(x: i, y: size))
-                ctx.move(to: CGPoint(x: 0, y: i)); ctx.addLine(to: CGPoint(x: size, y: i))
+        private func updateCamera() {
+            guard let camera else { return }
+            let x = camera.center.x + camera.radius * sin(camera.theta) * cos(camera.phi)
+            let y = camera.center.y + camera.radius * cos(camera.theta)
+            let z = camera.center.z + camera.radius * sin(camera.theta) * sin(camera.phi)
+            cameraNode.position = SCNVector3(x, y, z)
+            cameraNode.look(at: camera.center)
+        }
+
+        private func updateGridIfNeeded(cellSize: Float) {
+            guard renderedCellSize != cellSize, let scene = view?.scene else { return }
+            scene.rootNode.childNode(withName: "ground", recursively: false)?.removeFromParentNode()
+
+            let side: CGFloat = 100
+            let plane = SCNPlane(width: side, height: side)
+            let material = SCNMaterial()
+            material.diffuse.contents = gridTileImage()
+            material.diffuse.wrapS = .repeat
+            material.diffuse.wrapT = .repeat
+            let repeats = Float(side) / cellSize
+            material.diffuse.contentsTransform = SCNMatrix4MakeScale(repeats, repeats, 1)
+            material.isDoubleSided = true
+            material.lightingModel = .constant
+            plane.materials = [material]
+
+            let ground = SCNNode(geometry: plane)
+            ground.name = "ground"
+            ground.eulerAngles.x = -.pi / 2
+            ground.position.y = -0.0005
+            scene.rootNode.addChildNode(ground)
+            renderedCellSize = cellSize
+        }
+
+        private func gridTileImage() -> UIImage {
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64))
+            return renderer.image { context in
+                UIColor.secondarySystemBackground.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+                UIColor.separator.withAlphaComponent(0.75).setStroke()
+                context.cgContext.setLineWidth(1)
+                context.cgContext.move(to: CGPoint(x: 0.5, y: 0))
+                context.cgContext.addLine(to: CGPoint(x: 0.5, y: 64))
+                context.cgContext.move(to: CGPoint(x: 0, y: 0.5))
+                context.cgContext.addLine(to: CGPoint(x: 64, y: 0.5))
+                context.cgContext.strokePath()
             }
-            ctx.strokePath()
-            let img = UIGraphicsGetImageFromCurrentImageContext()!
-            UIGraphicsEndImageContext()
-            return img
         }
 
-        func refreshBricks() {
-            guard let scene = view?.scene, let world = world else { return }
-            scene.rootNode.childNodes
-                .filter { $0.name?.hasPrefix("brick_") == true }
-                .forEach { $0.removeFromParentNode() }
-            for b in world.bricks.values {
-                scene.rootNode.addChildNode(makeNode(for: b, cell: world.cellSize))
+        private func updateBrickNodes(_ bricks: [UUID: Brick]) {
+            guard let scene = view?.scene, let cellSize = world?.cellSize else { return }
+
+            for id in renderedBricks.keys where bricks[id] == nil {
+                scene.rootNode.childNode(withName: nodeName(id), recursively: false)?.removeFromParentNode()
             }
-            highlightSelection()
+
+            for (id, brick) in bricks where renderedBricks[id] != brick || renderedBrickCellSize != cellSize {
+                scene.rootNode.childNode(withName: nodeName(id), recursively: false)?.removeFromParentNode()
+                scene.rootNode.addChildNode(makeNode(for: brick, cellSize: cellSize))
+            }
+            renderedBricks = bricks
+            renderedBrickCellSize = cellSize
         }
 
-        func highlightSelection() {
-            guard let scene = view?.scene else { return }
-            scene.rootNode.childNodes
-                .filter { $0.name?.hasPrefix("brick_") == true }
-                .forEach { node in
-                    let isSel = node.name?.hasSuffix(selectedID?.uuidString ?? "___") ?? false
-                    node.geometry?.firstMaterial?.emission.contents = isSel ? UIColor.white.withAlphaComponent(0.25) : UIColor.clear
-                }
-        }
+        private func makeNode(for brick: Brick, cellSize: Float) -> SCNNode {
+            let width = CGFloat(Float(brick.size.x) * cellSize)
+            let height = CGFloat(Float(brick.size.y) * cellSize)
+            let length = CGFloat(Float(brick.size.z) * cellSize)
+            let box = SCNBox(width: width, height: height, length: length, chamferRadius: 0)
+            let material = SCNMaterial()
+            material.diffuse.contents = scnColor(brick.color)
+            material.lightingModel = .physicallyBased
+            box.materials = [material]
 
-        func makeNode(for b: Brick, cell: Float) -> SCNNode {
-            let w = CGFloat(Float(b.size.x) * cell)
-            let h = CGFloat(Float(b.size.y) * cell)
-            let l = CGFloat(Float(b.size.z) * cell)
-            let box = SCNBox(width: w, height: h, length: l, chamferRadius: 0)
-
-            let mat = SCNMaterial()
-            mat.diffuse.contents = scnColor(b.color)   // 来自 SCNHelpers.swift
-            mat.lightingModel = .physicallyBased
-            box.materials = [mat]
-
-            let n = SCNNode(geometry: box)
-            n.position = SCNVector3(
-                Float(b.pos.x) * cell,
-                Float(b.pos.y) * cell + Float(h)/2.0,
-                Float(b.pos.z) * cell
+            let node = SCNNode(geometry: box)
+            node.name = nodeName(brick.id)
+            node.position = SCNVector3(
+                (Float(brick.pos.x) + Float(brick.size.x) / 2) * cellSize,
+                (Float(brick.pos.y) + Float(brick.size.y) / 2) * cellSize,
+                (Float(brick.pos.z) + Float(brick.size.z) / 2) * cellSize
             )
-            n.name = "brick_\(b.id.uuidString)"
-            return n
+            return node
         }
 
-        // MARK: - Gestures
+        private func updateSelection(_ selectedID: UUID?) {
+            guard let scene = view?.scene else { return }
+            for (id, _) in renderedBricks {
+                let node = scene.rootNode.childNode(withName: nodeName(id), recursively: false)
+                node?.geometry?.firstMaterial?.emission.contents = id == selectedID
+                    ? UIColor.systemYellow.withAlphaComponent(0.45)
+                    : UIColor.clear
+            }
+        }
 
-        /// 点选：点到砖则选/反选；点空白则取消选中并在地面放置一块
-        @objc func onTap(_ gr: UITapGestureRecognizer) {
-            guard let v = view, let world = world else { return }
-            let p = gr.location(in: v)
-
-            if let hit = v.hitTest(p, options: [.firstFoundOnly: true]).first,
-               let name = hit.node.name, name.hasPrefix("brick_"),
-               let idStr = name.split(separator: "_").last,
-               let uuid = UUID(uuidString: String(idStr)) {
-
-                selectedID = (selectedID == uuid) ? nil : uuid
-                highlightSelection()
+        @objc private func onTap(_ recognizer: UITapGestureRecognizer) {
+            guard let view, let world, let editor else { return }
+            let point = recognizer.location(in: view)
+            if let id = brickID(at: point) {
+                editor.selectedID = editor.selectedID == id ? nil : id
                 return
             }
 
-            // 点空白：取消选中 + 在地面放置
-            selectedID = nil
-            highlightSelection()
-
-            let ray = screenPointToRay(v, pt: p)
-            guard let worldPos = intersectPlaneY(ray: ray, y: groundY) else { return }
-            let grid = snapToGrid(worldPos, cell: world.cellSize)
-
-            let newBrick = Brick(pos: SIMD3(grid.x, 0, grid.z),
-                                 size: defaultSize,
-                                 color: defaultColor)
-            if world.canPlace(newBrick) {
-                world.place(newBrick)
-                v.scene?.rootNode.addChildNode(makeNode(for: newBrick, cell: world.cellSize))
-            }
+            editor.selectedID = nil
+            guard editor.interactionMode == .draw,
+                  let position = gridPosition(at: point, planeY: 0) else { return }
+            let brick = Brick(
+                pos: SIMD3(position.x, 0, position.z),
+                size: editor.defaultSize,
+                color: editor.defaultColor
+            )
+            if world.place(brick) { editor.selectedID = brick.id }
         }
 
-        /// 长按：演示用，放一个 2x2x2 的蓝砖在 y=1
-        @objc func onLongPress(_ gr: UILongPressGestureRecognizer) {
-            guard gr.state == .began, let v = view, let world = world else { return }
-            let p = gr.location(in: v)
-            let ray = screenPointToRay(v, pt: p)
-            guard let worldPos = intersectPlaneY(ray: ray, y: groundY) else { return }
-            let grid = snapToGrid(worldPos, cell: world.cellSize)
-            let b = Brick(pos: SIMD3(grid.x, 1, grid.z),
-                          size: SIMD3(2,2,2),
-                          color: SIMD3(0.2,0.6,0.9))
-            if world.canPlace(b) {
-                world.place(b)
-                v.scene?.rootNode.addChildNode(makeNode(for: b, cell: world.cellSize))
-            }
+        @objc private func onLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard recognizer.state == .began,
+                  editor?.interactionMode == .draw,
+                  let view,
+                  let id = brickID(at: recognizer.location(in: view)) else { return }
+            editor?.selectedID = id
+            _ = world?.rotateAroundY(id: id)
         }
 
-        // 单指：移动/短划旋转（需已选中）
-        var swipeAccum: CGFloat = 0
-        @objc func onPanOneFinger(_ gr: UIPanGestureRecognizer) {
-            guard let v = view, let world = world, let sel = selectedID, var b = world.bricks[sel] else { return }
-            let p = gr.location(in: v)
+        @objc private func onOneFingerPan(_ recognizer: UIPanGestureRecognizer) {
+            guard let view, let world, let editor, let camera else { return }
+            if editor.interactionMode == .camera {
+                let delta = recognizer.translation(in: view)
+                recognizer.setTranslation(.zero, in: view)
+                camera.orbit(horizontal: Float(delta.x) * 0.005, vertical: -Float(delta.y) * 0.005)
+                return
+            }
 
-            switch gr.state {
+            switch recognizer.state {
             case .began:
-                mode = .moving
-
-            case .changed:
-                // 在当前砖块的 Y 层平移（XZ 吸附）
-                let ray = screenPointToRay(v, pt: p)
-                let planeY = Float(b.pos.y) * world.cellSize
-                guard let wpos = intersectPlaneY(ray: ray, y: planeY) else { return }
-                let g = snapToGrid(wpos, cell: world.cellSize)
-
-                var newB = b
-                newB.pos.x = g.x
-                newB.pos.z = g.z
-
-                if world.canPlace(newB) {
-                    world.remove(id: sel)
-                    world.place(newB)
-                    selectedID = newB.id
-                    refreshBricks()
-                }
-
-                // 横向短划触发 90° 旋转（Y 轴）
-                if abs(swipeAccum) > 60, let cur = selectedID, var rb = world.bricks[cur] {
-                    swipeAccum = 0
-
-                    // ✨ 用临时变量交换，避免重叠 inout
-                    let t = rb.size.x
-                    rb.size.x = rb.size.z
-                    rb.size.z = t
-
-                    // 旋转判定时先把旧砖移出占用再检查，否则可能误判冲突
-                    world.remove(id: cur)
-                    if world.canPlace(rb) {
-                        world.place(rb)
-                        selectedID = rb.id
+                movingID = brickID(at: recognizer.location(in: view))
+                editor.selectedID = movingID
+                if let id = movingID, let brick = world.bricks[id] {
+                    let planeY = Float(brick.pos.y) * world.cellSize
+                    if let grid = gridPosition(at: recognizer.location(in: view), planeY: planeY) {
+                        dragOffset = SIMD2(brick.pos.x - grid.x, brick.pos.z - grid.z)
                     } else {
-                        // 放不下就回退到原砖
-                        world.place(b)
+                        dragOffset = .zero
                     }
-                    refreshBricks()
+                    world.beginTransaction()
                 }
-
-
+            case .changed:
+                guard let id = movingID, let brick = world.bricks[id] else { return }
+                let planeY = Float(brick.pos.y) * world.cellSize
+                guard let grid = gridPosition(at: recognizer.location(in: view), planeY: planeY) else { return }
+                _ = world.move(
+                    id: id,
+                    to: SIMD3(grid.x + dragOffset.x, brick.pos.y, grid.z + dragOffset.y)
+                )
+            case .ended:
+                world.endTransaction()
+                movingID = nil
+            case .cancelled, .failed:
+                world.cancelTransaction()
+                movingID = nil
             default:
-                swipeAccum = 0
-                mode = .none
-                highlightSelection()
+                break
             }
         }
 
-        // 双指：相机旋转
-        @objc func onPanTwoFingers(_ gr: UIPanGestureRecognizer) {
-            guard let v = view else { return }
-            let delta = gr.translation(in: v)
-            gr.setTranslation(.zero, in: v)
-
-            orbitPhi   += Float(delta.x) * 0.005
-            orbitTheta  = min(max(0.1, orbitTheta - Float(delta.y) * 0.005), Float.pi - 0.1)
-            updateCameraPosition()
+        @objc private func onTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
+            guard let view, let camera else { return }
+            let delta = recognizer.translation(in: view)
+            recognizer.setTranslation(.zero, in: view)
+            camera.pan(screenX: Float(delta.x), screenY: Float(delta.y))
         }
 
-        // 捏合：相机缩放
-        @objc func onPinch(_ gr: UIPinchGestureRecognizer) {
-            if gr.state == .changed {
-                orbitRadius = min(max(0.5, orbitRadius / Float(gr.scale)), 20)
-                updateCameraPosition()
-                gr.scale = 1
+        @objc private func onPinch(_ recognizer: UIPinchGestureRecognizer) {
+            guard recognizer.state == .changed, let camera else { return }
+            camera.zoom(by: Float(recognizer.scale))
+            recognizer.scale = 1
+        }
+
+        private func brickID(at point: CGPoint) -> UUID? {
+            guard let view else { return nil }
+            for hit in view.hitTest(point) {
+                guard let name = hit.node.name, name.hasPrefix("brick_") else { continue }
+                return UUID(uuidString: String(name.dropFirst("brick_".count)))
             }
+            return nil
         }
+
+        private func gridPosition(at point: CGPoint, planeY: Float) -> SIMD3<Int>? {
+            guard let view, let world else { return nil }
+            let ray = screenPointToRay(view, pt: point)
+            guard let position = intersectPlaneY(ray: ray, y: planeY) else { return nil }
+            return snapToGrid(position, cell: world.cellSize)
+        }
+
+        private func nodeName(_ id: UUID) -> String { "brick_\(id.uuidString)" }
     }
 }

@@ -1,23 +1,14 @@
-//
-//  Brick.swift
-//  bricks
-//
-//  Created by Dn.A on 5/10/2025.
-//
-
-
+import Combine
 import Foundation
 import simd
-import Combine 
 
-/// 以“格”为单位（整数）的砖块
 struct Brick: Identifiable, Codable, Hashable {
     let id: UUID
-    var pos: SIMD3<Int>      // 砖块锚点位置（格）
-    var size: SIMD3<Int>     // 砖块尺寸（格）
-    var color: SIMD3<Float>  // 0...1
+    var pos: SIMD3<Int>
+    var size: SIMD3<Int>
+    var color: SIMD3<Float>
 
-    init(id: UUID = UUID(), pos: SIMD3<Int>, size: SIMD3<Int> = SIMD3(2,1,4), color: SIMD3<Float> = SIMD3(0.9,0.4,0.2)) {
+    init(id: UUID = UUID(), pos: SIMD3<Int>, size: SIMD3<Int> = SIMD3(2, 1, 4), color: SIMD3<Float> = SIMD3(0.9, 0.4, 0.2)) {
         self.id = id
         self.pos = pos
         self.size = size
@@ -25,65 +16,273 @@ struct Brick: Identifiable, Codable, Hashable {
     }
 }
 
-/// 世界状态：网格大小 + 砖块集合 + 占用集
+struct WorldDocument: Codable, Equatable {
+    static let currentVersion = 1
+
+    var version = currentVersion
+    var cellSize: Float
+    var bricks: [Brick]
+}
+
+enum WorldStateError: LocalizedError {
+    case invalidDocument
+
+    var errorDescription: String? {
+        "模型文件包含无效尺寸、地下方块或重叠方块"
+    }
+}
+
+@MainActor
 final class WorldState: ObservableObject {
+    static let supportedCellSizes: [Float] = [0.2, 0.1, 0.05, 0.025]
+
     @Published private(set) var bricks: [UUID: Brick] = [:]
-    let cellSize: Float = 0.1  // 每格 0.1 米，随你改
+    @Published private(set) var cellSize: Float = 0.1
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
 
-    // 占用结构：被占用的格坐标集合（仅示例，先简单做）
-    private var occupied: Set<SIMD3<Int>> = []
+    private var occupied: [SIMD3<Int>: UUID] = [:]
+    private var undoStack: [WorldDocument] = []
+    private var redoStack: [WorldDocument] = []
+    private var transactionStart: WorldDocument?
+    private let historyLimit = 100
 
-    func canPlace(_ b: Brick) -> Bool {
-        for p in iterCells(of: b) where occupied.contains(p) { return false }
+    func canPlace(_ brick: Brick, excluding ignoredID: UUID? = nil) -> Bool {
+        guard brick.pos.y >= 0,
+              brick.size.x > 0, brick.size.y > 0, brick.size.z > 0 else { return false }
+
+        return cells(of: brick).allSatisfy { cell in
+            guard let owner = occupied[cell] else { return true }
+            return owner == ignoredID
+        }
+    }
+
+    @discardableResult
+    func place(_ brick: Brick) -> Bool {
+        guard bricks[brick.id] == nil, canPlace(brick) else { return false }
+        recordUndoPoint()
+        insert(brick)
+        publishModelChange()
         return true
     }
 
-    func place(_ b: Brick) {
-        bricks[b.id] = b
-        for p in iterCells(of: b) { occupied.insert(p) }
+    @discardableResult
+    func move(id: UUID, to position: SIMD3<Int>) -> Bool {
+        guard var brick = bricks[id] else { return false }
+        guard brick.pos != position else { return true }
+        brick.pos = position
+        guard canPlace(brick, excluding: id) else { return false }
+
+        recordUndoPoint()
+        removeFromOccupancy(id: id)
+        bricks[id] = brick
+        addToOccupancy(brick)
+        publishModelChange()
+        return true
     }
 
-    func remove(id: UUID) {
-        guard let b = bricks.removeValue(forKey: id) else { return }
-        for p in iterCells(of: b) { occupied.remove(p) }
+    @discardableResult
+    func rotateAroundY(id: UUID) -> Bool {
+        guard var brick = bricks[id] else { return false }
+        (brick.size.x, brick.size.z) = (brick.size.z, brick.size.x)
+        guard canPlace(brick, excluding: id) else { return false }
+
+        recordUndoPoint()
+        removeFromOccupancy(id: id)
+        bricks[id] = brick
+        addToOccupancy(brick)
+        publishModelChange()
+        return true
+    }
+
+    @discardableResult
+    func remove(id: UUID) -> Bool {
+        guard bricks[id] != nil else { return false }
+        recordUndoPoint()
+        removeFromOccupancy(id: id)
+        bricks.removeValue(forKey: id)
+        publishModelChange()
+        return true
     }
 
     func brick(atGrid grid: SIMD3<Int>) -> Brick? {
-        // 简化：遍历查找（砖块数量不大时OK；后续可映射格->砖ID）
-        for b in bricks.values {
-            let minP = b.pos
-            let maxP = b.pos &+ (b.size &- SIMD3(1,1,1))
-            if grid.x >= minP.x && grid.x <= maxP.x &&
-               grid.y >= minP.y && grid.y <= maxP.y &&
-               grid.z >= minP.z && grid.z <= maxP.z {
-                return b
-            }
-        }
-        return nil
+        guard let id = occupied[grid] else { return nil }
+        return bricks[id]
     }
 
-    // 遍历砖块占用的所有格
-    private func iterCells(of b: Brick) -> [SIMD3<Int>] {
-        var cells: [SIMD3<Int>] = []
-        for x in b.pos.x ..< b.pos.x + b.size.x {
-            for y in b.pos.y ..< b.pos.y + b.size.y {
-                for z in b.pos.z ..< b.pos.z + b.size.z {
-                    cells.append(SIMD3(x,y,z))
+    func beginTransaction() {
+        guard transactionStart == nil else { return }
+        transactionStart = snapshot
+    }
+
+    func endTransaction() {
+        guard let start = transactionStart else { return }
+        transactionStart = nil
+        guard start != snapshot else { return }
+        pushUndo(start)
+    }
+
+    func cancelTransaction() {
+        guard let start = transactionStart else { return }
+        transactionStart = nil
+        restore(start)
+    }
+
+    func undo() {
+        endTransaction()
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(snapshot)
+        restore(previous)
+        updateHistoryAvailability()
+    }
+
+    func redo() {
+        endTransaction()
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(snapshot)
+        restore(next)
+        updateHistoryAvailability()
+    }
+
+    @discardableResult
+    func setCellSize(_ newSize: Float) -> Bool {
+        guard newSize > 0, abs(newSize - cellSize) > 0.000_001 else { return false }
+        let previous = snapshot
+        let scale = cellSize / newSize
+        let resampled = bricks.values.map { brick -> Brick in
+            var copy = brick
+            copy.pos = SIMD3(
+                Int((Float(brick.pos.x) * scale).rounded()),
+                Int((Float(brick.pos.y) * scale).rounded()),
+                Int((Float(brick.pos.z) * scale).rounded())
+            )
+            copy.size = SIMD3(
+                max(1, Int((Float(brick.size.x) * scale).rounded())),
+                max(1, Int((Float(brick.size.y) * scale).rounded())),
+                max(1, Int((Float(brick.size.z) * scale).rounded()))
+            )
+            return copy
+        }
+
+        var proposedOccupancy: [SIMD3<Int>: UUID] = [:]
+        for brick in resampled {
+            for cell in cells(of: brick) {
+                guard proposedOccupancy[cell] == nil else { return false }
+                proposedOccupancy[cell] = brick.id
+            }
+        }
+
+        cellSize = newSize
+        bricks = Dictionary(uniqueKeysWithValues: resampled.map { ($0.id, $0) })
+        occupied = proposedOccupancy
+        pushUndo(previous)
+        publishModelChange()
+        return true
+    }
+
+    func save(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(snapshot).write(to: url, options: .atomic)
+    }
+
+    func load(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        let document: WorldDocument
+        if let decoded = try? decoder.decode(WorldDocument.self, from: data) {
+            document = decoded
+        } else {
+            document = WorldDocument(cellSize: 0.1, bricks: try decoder.decode([Brick].self, from: data))
+        }
+
+        guard document.cellSize > 0, isValidLayout(document.bricks) else {
+            throw WorldStateError.invalidDocument
+        }
+
+        let previous = snapshot
+        restore(document)
+        pushUndo(previous)
+    }
+
+    private var snapshot: WorldDocument {
+        WorldDocument(cellSize: cellSize, bricks: bricks.values.sorted { $0.id.uuidString < $1.id.uuidString })
+    }
+
+    private func recordUndoPoint() {
+        guard transactionStart == nil else { return }
+        pushUndo(snapshot)
+    }
+
+    private func pushUndo(_ state: WorldDocument) {
+        undoStack.append(state)
+        if undoStack.count > historyLimit { undoStack.removeFirst() }
+        redoStack.removeAll()
+        updateHistoryAvailability()
+    }
+
+    private func restore(_ document: WorldDocument) {
+        cellSize = document.cellSize
+        bricks = Dictionary(uniqueKeysWithValues: document.bricks.map { ($0.id, $0) })
+        rebuildOccupancy()
+        publishModelChange()
+    }
+
+    private func insert(_ brick: Brick) {
+        bricks[brick.id] = brick
+        addToOccupancy(brick)
+    }
+
+    private func addToOccupancy(_ brick: Brick) {
+        for cell in cells(of: brick) { occupied[cell] = brick.id }
+    }
+
+    private func removeFromOccupancy(id: UUID) {
+        guard let brick = bricks[id] else { return }
+        for cell in cells(of: brick) where occupied[cell] == id {
+            occupied.removeValue(forKey: cell)
+        }
+    }
+
+    private func rebuildOccupancy() {
+        occupied.removeAll(keepingCapacity: true)
+        for brick in bricks.values { addToOccupancy(brick) }
+    }
+
+    private func cells(of brick: Brick) -> [SIMD3<Int>] {
+        var result: [SIMD3<Int>] = []
+        result.reserveCapacity(brick.size.x * brick.size.y * brick.size.z)
+        for x in brick.pos.x ..< brick.pos.x + brick.size.x {
+            for y in brick.pos.y ..< brick.pos.y + brick.size.y {
+                for z in brick.pos.z ..< brick.pos.z + brick.size.z {
+                    result.append(SIMD3(x, y, z))
                 }
             }
         }
-        return cells
+        return result
     }
 
-    // 简易存档
-    func save(to url: URL) throws {
-        let data = try JSONEncoder().encode(Array(bricks.values))
-        try data.write(to: url)
+    private func isValidLayout(_ candidateBricks: [Brick]) -> Bool {
+        var seenIDs: Set<UUID> = []
+        var seenCells: Set<SIMD3<Int>> = []
+        for brick in candidateBricks {
+            guard seenIDs.insert(brick.id).inserted,
+                  brick.pos.y >= 0,
+                  brick.size.x > 0, brick.size.y > 0, brick.size.z > 0 else { return false }
+            for cell in cells(of: brick) where !seenCells.insert(cell).inserted {
+                return false
+            }
+        }
+        return true
     }
-    func load(from url: URL) throws {
-        let data = try Data(contentsOf: url)
-        let arr = try JSONDecoder().decode([Brick].self, from: data)
-        bricks.removeAll(); occupied.removeAll()
-        for b in arr { place(b) }
+
+    private func publishModelChange() {
+        objectWillChange.send()
+        updateHistoryAvailability()
+    }
+
+    private func updateHistoryAvailability() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
     }
 }
