@@ -33,7 +33,7 @@ final class EditorState: ObservableObject {
     @Published var selectedID: UUID?
     @Published var drawingTool: DrawingTool = .brush
     @Published var gridScaleMode: GridScaleMode = .automatic
-    @Published var isBrushSizeLocked = true
+    @Published var isBrushSizeLocked = false
     @Published var lockedBrushSizeMeters: Double = 0.1
     @Published var visibleGridSizeMeters: Double = 0.1
 }

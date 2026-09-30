@@ -67,6 +67,19 @@ final class WorldState: ObservableObject {
     }
 
     @discardableResult
+    func place(_ candidates: [Brick]) -> Int {
+        var acceptedCount = 0
+        for candidate in candidates where bricks[candidate.id] == nil && canPlace(candidate) {
+            if acceptedCount == 0 { recordUndoPoint() }
+            insert(candidate)
+            acceptedCount += 1
+        }
+        guard acceptedCount > 0 else { return 0 }
+        publishModelChange()
+        return acceptedCount
+    }
+
+    @discardableResult
     func move(id: UUID, to position: SIMD3<Int>) -> Bool {
         guard var brick = bricks[id] else { return false }
         guard brick.pos != position else { return true }
@@ -124,13 +137,62 @@ final class WorldState: ObservableObject {
             guard let brick = bricks[id] else { continue }
             removeFromOccupancy(id: id)
             bricks.removeValue(forKey: id)
-            for cell in cells(of: brick) where !eraseCells.contains(cell) {
-                replacements.append(Brick(pos: cell, size: SIMD3(repeating: 1), color: brick.color))
-            }
+            replacements.append(contentsOf: subtractingCube(from: brick, origin: origin, size: size))
         }
         for brick in replacements { insert(brick) }
         publishModelChange()
         return true
+    }
+
+    private func subtractingCube(from brick: Brick, origin: SIMD3<Int>, size: Int) -> [Brick] {
+        let brickMax = SIMD3(
+            brick.pos.x + brick.size.x,
+            brick.pos.y + brick.size.y,
+            brick.pos.z + brick.size.z
+        )
+        let eraseMax = SIMD3(origin.x + size, origin.y + size, origin.z + size)
+        let low = SIMD3(
+            max(brick.pos.x, origin.x),
+            max(brick.pos.y, origin.y),
+            max(brick.pos.z, origin.z)
+        )
+        let high = SIMD3(
+            min(brickMax.x, eraseMax.x),
+            min(brickMax.y, eraseMax.y),
+            min(brickMax.z, eraseMax.z)
+        )
+        guard low.x < high.x, low.y < high.y, low.z < high.z else { return [brick] }
+
+        var result: [Brick] = []
+        func append(_ pos: SIMD3<Int>, _ dimensions: SIMD3<Int>) {
+            guard dimensions.x > 0, dimensions.y > 0, dimensions.z > 0 else { return }
+            result.append(Brick(pos: pos, size: dimensions, color: brick.color))
+        }
+
+        append(brick.pos, SIMD3(low.x - brick.pos.x, brick.size.y, brick.size.z))
+        append(
+            SIMD3(high.x, brick.pos.y, brick.pos.z),
+            SIMD3(brickMax.x - high.x, brick.size.y, brick.size.z)
+        )
+        let middleX = high.x - low.x
+        append(
+            SIMD3(low.x, brick.pos.y, brick.pos.z),
+            SIMD3(middleX, low.y - brick.pos.y, brick.size.z)
+        )
+        append(
+            SIMD3(low.x, high.y, brick.pos.z),
+            SIMD3(middleX, brickMax.y - high.y, brick.size.z)
+        )
+        let middleY = high.y - low.y
+        append(
+            SIMD3(low.x, low.y, brick.pos.z),
+            SIMD3(middleX, middleY, low.z - brick.pos.z)
+        )
+        append(
+            SIMD3(low.x, low.y, high.z),
+            SIMD3(middleX, middleY, brickMax.z - high.z)
+        )
+        return result
     }
 
     func brick(atGrid grid: SIMD3<Int>) -> Brick? {

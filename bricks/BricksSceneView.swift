@@ -47,6 +47,8 @@ struct BricksSceneView: UIViewRepresentable {
         private var drawingLayerY: Int?
         private enum TwoFingerMode { case viewTilt, pan }
         private var twoFingerMode: TwoFingerMode?
+        private var rotationAccumulator: CGFloat = 0
+        private var isTwisting = false
         private lazy var brickGridImage = makeBrickGridImage()
 
         func connect(view: SCNView, world: WorldState, editor: EditorState, camera: CameraState) {
@@ -398,13 +400,13 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func draw(cells: [SIMD3<Int>], in world: WorldState) {
             let step = brushStep(world: world)
-            for cell in cells {
-                _ = world.place(Brick(
+            _ = world.place(cells.map { cell in
+                Brick(
                     pos: cell,
                     size: SIMD3(repeating: step),
                     color: SIMD3(0.2, 0.55, 0.95)
-                ))
-            }
+                )
+            })
         }
 
         private func interpolatedCells(from start: SIMD3<Int>, to end: SIMD3<Int>, step: Int) -> [SIMD3<Int>] {
@@ -439,7 +441,7 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func erase(at point: CGPoint, world: WorldState) {
             guard let cell = eraserCell(at: point) else { return }
-            let step = max(1, Int(((editor?.visibleGridSizeMeters ?? Double(world.cellSize)) / Double(world.cellSize)).rounded()))
+            let step = brushStep(world: world)
             _ = world.eraseCube(origin: quantized(cell: cell, step: step), size: step)
         }
 
@@ -449,9 +451,12 @@ struct BricksSceneView: UIViewRepresentable {
                 let first = recognizer.location(ofTouch: 0, in: view)
                 let second = recognizer.location(ofTouch: 1, in: view)
                 twoFingerMode = hypot(first.x - second.x, first.y - second.y) < 110 ? .viewTilt : .pan
+                isTwisting = false
+                rotationAccumulator = 0
             }
             let delta = recognizer.translation(in: view)
             recognizer.setTranslation(.zero, in: view)
+            guard !isTwisting else { return }
             switch twoFingerMode {
             case .viewTilt:
                 camera.orbit(
@@ -465,12 +470,27 @@ struct BricksSceneView: UIViewRepresentable {
             }
             if recognizer.state == .ended || recognizer.state == .cancelled || recognizer.state == .failed {
                 twoFingerMode = nil
+                isTwisting = false
+                rotationAccumulator = 0
             }
         }
 
         @objc private func onRotation(_ recognizer: UIRotationGestureRecognizer) {
-            guard recognizer.state == .changed, let camera else { return }
-            camera.rotate(horizontal: Double(recognizer.rotation))
+            guard let camera else { return }
+            if recognizer.state == .began {
+                rotationAccumulator = 0
+                isTwisting = false
+            }
+            guard recognizer.state == .changed else {
+                if recognizer.state == .ended || recognizer.state == .cancelled || recognizer.state == .failed {
+                    rotationAccumulator = 0
+                    isTwisting = false
+                }
+                return
+            }
+            rotationAccumulator += recognizer.rotation
+            if abs(rotationAccumulator) >= 0.08 { isTwisting = true }
+            if isTwisting { camera.rotate(horizontal: Double(recognizer.rotation)) }
             recognizer.rotation = 0
         }
 
