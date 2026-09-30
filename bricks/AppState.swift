@@ -16,21 +16,21 @@ final class EditorState: ObservableObject {
 
     @Published var interactionMode: InteractionMode = .camera
     @Published var selectedID: UUID?
+    @Published var isBrushSizeLocked = true
+    @Published var lockedBrushSizeMeters: Double = 0.1
+    @Published var visibleGridSizeMeters: Double = 0.1
 }
 
 @MainActor
 final class CameraState: ObservableObject {
     @Published var center = SIMD3<Double>(repeating: 0)
     @Published var radius: Double = 2.5
-    @Published var rotation = simd_quatd(angle: .pi / 4, axis: SIMD3(0, 1, 0))
-        * simd_quatd(angle: -.pi / 3, axis: SIMD3(1, 0, 0))
+    @Published var theta: Double = .pi / 5
+    @Published var phi: Double = .pi / 4
 
-    func rotateArcball(from start: SIMD3<Double>, to end: SIMD3<Double>) {
-        let dotProduct = min(1, max(-1, simd_dot(start, end)))
-        let axis = simd_cross(start, end)
-        guard simd_length_squared(axis) > 0.000_000_1 else { return }
-        let localRotation = simd_quatd(real: 1 + dotProduct, imag: axis).normalized
-        rotation = (rotation * localRotation).normalized
+    func orbit(horizontal: Double, vertical: Double) {
+        phi -= horizontal
+        theta = min(max(0.08, theta + vertical), .pi / 2 - 0.04)
     }
 
     func zoom(by scale: Double) {
@@ -39,8 +39,8 @@ final class CameraState: ObservableObject {
 
     func pan(screenX: Double, screenY: Double) {
         let distanceScale = radius * 0.0015
-        let right = rotation.act(SIMD3<Double>(1, 0, 0))
-        let up = rotation.act(SIMD3<Double>(0, 1, 0))
-        center += right * (-screenX * distanceScale) + up * (screenY * distanceScale)
+        let right = SIMD3<Double>(sin(phi), 0, -cos(phi))
+        let forward = SIMD3<Double>(-cos(phi), 0, -sin(phi))
+        center += right * (-screenX * distanceScale) + forward * (-screenY * distanceScale)
     }
 }

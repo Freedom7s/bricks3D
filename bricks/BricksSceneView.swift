@@ -43,7 +43,8 @@ struct BricksSceneView: UIViewRepresentable {
         private var renderedOrigin = SIMD3<Double>(repeating: 0)
         private var previousOrigin = SIMD3<Double>(repeating: .nan)
         private var lastDrawCell: SIMD3<Int>?
-        private var lastArcballPoint: SIMD3<Double>?
+        private enum TwoFingerMode { case orbit, pan }
+        private var twoFingerMode: TwoFingerMode?
 
         func connect(view: SCNView, world: WorldState, editor: EditorState, camera: CameraState) {
             self.view = view
@@ -126,13 +127,15 @@ struct BricksSceneView: UIViewRepresentable {
         private func updateCamera() {
             guard let camera else { return }
             let center = camera.center - renderedOrigin
-            let offset = camera.rotation.act(SIMD3<Double>(0, 0, camera.radius))
-            let up = camera.rotation.act(SIMD3<Double>(0, 1, 0))
-            let position = center + offset
+            let position = SIMD3(
+                center.x + camera.radius * sin(camera.theta) * cos(camera.phi),
+                center.y + camera.radius * cos(camera.theta),
+                center.z + camera.radius * sin(camera.theta) * sin(camera.phi)
+            )
             cameraNode.position = scnVector(position)
             cameraNode.look(
                 at: scnVector(center),
-                up: scnVector(up),
+                up: SCNVector3(0, 1, 0),
                 localFront: SCNVector3(0, 0, -1)
             )
         }
@@ -181,6 +184,9 @@ struct BricksSceneView: UIViewRepresentable {
             ) - renderedOrigin
             ground.position = SCNVector3(Float(snappedCenter.x), -0.0005, Float(snappedCenter.z))
             renderedGridSpacing = spacing
+            if editor?.visibleGridSizeMeters != spacing {
+                editor?.visibleGridSizeMeters = spacing
+            }
         }
 
         private func displayGridSpacing(radius: Double, minimum: Double) -> Double {
@@ -263,25 +269,16 @@ struct BricksSceneView: UIViewRepresentable {
                 let id = brickID(at: point)
                 editor.selectedID = editor.selectedID == id ? nil : id
             } else if let cell = gridPosition(at: point, planeY: 0) {
-                draw(cells: [cell], in: world)
+                draw(cells: [quantized(cell: cell, step: brushStep(world: world))], in: world)
             }
         }
 
         @objc private func onOneFingerPan(_ recognizer: UIPanGestureRecognizer) {
             guard let view, let world, let editor, let camera else { return }
             if editor.interactionMode == .camera {
-                let current = arcballPoint(for: recognizer.location(in: view), viewSize: view.bounds.size)
-                switch recognizer.state {
-                case .began:
-                    lastArcballPoint = current
-                case .changed:
-                    if let previous = lastArcballPoint {
-                        camera.rotateArcball(from: previous, to: current)
-                    }
-                    lastArcballPoint = current
-                default:
-                    lastArcballPoint = nil
-                }
+                let delta = recognizer.translation(in: view)
+                recognizer.setTranslation(.zero, in: view)
+                camera.pan(screenX: Double(delta.x), screenY: Double(delta.y))
                 return
             }
 
@@ -306,41 +303,74 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func drawStroke(at point: CGPoint, world: WorldState) {
             guard let cell = gridPosition(at: point, planeY: 0) else { return }
-            let cells = lastDrawCell.map { interpolatedCells(from: $0, to: cell) } ?? [cell]
+            let step = brushStep(world: world)
+            let anchor = quantized(cell: cell, step: step)
+            let cells = lastDrawCell.map { interpolatedCells(from: $0, to: anchor, step: step) } ?? [anchor]
             draw(cells: cells, in: world)
-            lastDrawCell = cell
+            lastDrawCell = anchor
         }
 
         private func draw(cells: [SIMD3<Int>], in world: WorldState) {
-            for cell in cells where world.brick(atGrid: SIMD3(cell.x, 0, cell.z)) == nil {
+            let step = brushStep(world: world)
+            for cell in cells {
                 _ = world.place(Brick(
                     pos: SIMD3(cell.x, 0, cell.z),
-                    size: SIMD3(repeating: 1),
+                    size: SIMD3(repeating: step),
                     color: SIMD3(0.2, 0.55, 0.95)
                 ))
             }
         }
 
-        private func interpolatedCells(from start: SIMD3<Int>, to end: SIMD3<Int>) -> [SIMD3<Int>] {
-            let dx = end.x - start.x
-            let dz = end.z - start.z
+        private func interpolatedCells(from start: SIMD3<Int>, to end: SIMD3<Int>, step: Int) -> [SIMD3<Int>] {
+            let dx = (end.x - start.x) / step
+            let dz = (end.z - start.z) / step
             let steps = max(abs(dx), abs(dz))
             guard steps > 0 else { return [end] }
             return (0...steps).map { index in
                 let t = Double(index) / Double(steps)
                 return SIMD3(
-                    Int((Double(start.x) + Double(dx) * t).rounded()),
+                    start.x + Int((Double(dx) * t).rounded()) * step,
                     0,
-                    Int((Double(start.z) + Double(dz) * t).rounded())
+                    start.z + Int((Double(dz) * t).rounded()) * step
                 )
             }
         }
 
+        private func brushStep(world: WorldState) -> Int {
+            let size = editor?.isBrushSizeLocked == true
+                ? editor?.lockedBrushSizeMeters ?? Double(world.cellSize)
+                : editor?.visibleGridSizeMeters ?? Double(world.cellSize)
+            return max(1, Int((size / Double(world.cellSize)).rounded()))
+        }
+
+        private func quantized(cell: SIMD3<Int>, step: Int) -> SIMD3<Int> {
+            SIMD3(
+                Int(floor(Double(cell.x) / Double(step))) * step,
+                0,
+                Int(floor(Double(cell.z) / Double(step))) * step
+            )
+        }
+
         @objc private func onTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
             guard let view, let camera else { return }
+            if recognizer.state == .began, recognizer.numberOfTouches == 2 {
+                let first = recognizer.location(ofTouch: 0, in: view)
+                let second = recognizer.location(ofTouch: 1, in: view)
+                twoFingerMode = hypot(first.x - second.x, first.y - second.y) < 110 ? .orbit : .pan
+            }
             let delta = recognizer.translation(in: view)
             recognizer.setTranslation(.zero, in: view)
-            camera.pan(screenX: Double(delta.x), screenY: Double(delta.y))
+            switch twoFingerMode {
+            case .orbit:
+                camera.orbit(horizontal: Double(delta.x) * 0.005, vertical: Double(delta.y) * 0.005)
+            case .pan:
+                camera.pan(screenX: Double(delta.x), screenY: Double(delta.y))
+            case nil:
+                break
+            }
+            if recognizer.state == .ended || recognizer.state == .cancelled || recognizer.state == .failed {
+                twoFingerMode = nil
+            }
         }
 
         @objc private func onPinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -372,22 +402,6 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func scnVector(_ value: SIMD3<Double>) -> SCNVector3 {
             SCNVector3(Float(value.x), Float(value.y), Float(value.z))
-        }
-
-        private func arcballPoint(for point: CGPoint, viewSize: CGSize) -> SIMD3<Double> {
-            let scale = max(1, min(viewSize.width, viewSize.height))
-            var vector = SIMD3<Double>(
-                Double((2 * point.x - viewSize.width) / scale),
-                Double((viewSize.height - 2 * point.y) / scale),
-                0
-            )
-            let lengthSquared = vector.x * vector.x + vector.y * vector.y
-            if lengthSquared <= 1 {
-                vector.z = sqrt(1 - lengthSquared)
-            } else {
-                vector /= sqrt(lengthSquared)
-            }
-            return simd_normalize(vector)
         }
 
         private func nodeName(_ id: UUID) -> String { "brick_\(id.uuidString)" }

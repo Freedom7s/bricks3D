@@ -27,6 +27,11 @@ struct ContentView: View {
             .padding(.horizontal, 10)
             .padding(.top, 8)
         }
+        .overlay(alignment: .bottomLeading) {
+            scaleIndicator
+                .padding(.leading, 18)
+                .padding(.bottom, 22)
+        }
         .onChange(of: world.bricks) { _, bricks in
             if let selectedID = editor.selectedID, bricks[selectedID] == nil {
                 editor.selectedID = nil
@@ -58,7 +63,7 @@ struct ContentView: View {
             .disabled(!world.canRedo)
             .accessibilityLabel("重做")
 
-            Label(gridLabel(world.cellSize), systemImage: "grid")
+            Label(gridLabel(Float(editor.visibleGridSizeMeters)), systemImage: "grid")
                 .font(.caption)
 
             Menu {
@@ -75,11 +80,42 @@ struct ContentView: View {
     }
 
     private var drawingToolbar: some View {
-        Label("单指滑动连续绘制单格体素", systemImage: "hand.draw")
-            .font(.caption)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
+        HStack(spacing: 10) {
+            Label("单指滑动绘制", systemImage: "hand.draw")
+            Button {
+                editor.isBrushSizeLocked.toggle()
+                if editor.isBrushSizeLocked {
+                    editor.lockedBrushSizeMeters = editor.visibleGridSizeMeters
+                }
+            } label: {
+                Label(
+                    editor.isBrushSizeLocked ? "大小锁定" : "跟随网格",
+                    systemImage: editor.isBrushSizeLocked ? "lock.fill" : "lock.open"
+                )
+            }
+            .buttonStyle(.bordered)
+        }
+        .font(.caption)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private var scaleIndicator: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(gridLabel(Float(editor.visibleGridSizeMeters)))
+                .font(.caption2.monospacedDigit())
+            HStack(spacing: 0) {
+                Rectangle().frame(width: 2, height: 8)
+                Rectangle().frame(width: 72, height: 2)
+                Rectangle().frame(width: 2, height: 8)
+            }
+        }
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .allowsHitTesting(false)
     }
 
     private func gridLabel(_ size: Float) -> String {
