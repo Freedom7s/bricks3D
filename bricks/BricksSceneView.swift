@@ -43,6 +43,7 @@ struct BricksSceneView: UIViewRepresentable {
         private var renderedOrigin = SIMD3<Double>(repeating: 0)
         private var previousOrigin = SIMD3<Double>(repeating: .nan)
         private var lastDrawCell: SIMD3<Int>?
+        private var lastArcballPoint: SIMD3<Double>?
 
         func connect(view: SCNView, world: WorldState, editor: EditorState, camera: CameraState) {
             self.view = view
@@ -125,13 +126,15 @@ struct BricksSceneView: UIViewRepresentable {
         private func updateCamera() {
             guard let camera else { return }
             let center = camera.center - renderedOrigin
-            let position = SIMD3(
-                center.x + camera.radius * sin(camera.theta) * cos(camera.phi),
-                center.y + camera.radius * cos(camera.theta),
-                center.z + camera.radius * sin(camera.theta) * sin(camera.phi)
-            )
+            let offset = camera.rotation.act(SIMD3<Double>(0, 0, camera.radius))
+            let up = camera.rotation.act(SIMD3<Double>(0, 1, 0))
+            let position = center + offset
             cameraNode.position = scnVector(position)
-            cameraNode.look(at: scnVector(center))
+            cameraNode.look(
+                at: scnVector(center),
+                up: scnVector(up),
+                localFront: SCNVector3(0, 0, -1)
+            )
         }
 
         private func updateGrid(cellSize: Float) {
@@ -267,9 +270,18 @@ struct BricksSceneView: UIViewRepresentable {
         @objc private func onOneFingerPan(_ recognizer: UIPanGestureRecognizer) {
             guard let view, let world, let editor, let camera else { return }
             if editor.interactionMode == .camera {
-                let delta = recognizer.translation(in: view)
-                recognizer.setTranslation(.zero, in: view)
-                camera.orbit(horizontal: -Double(delta.x) * 0.005, vertical: -Double(delta.y) * 0.005)
+                let current = arcballPoint(for: recognizer.location(in: view), viewSize: view.bounds.size)
+                switch recognizer.state {
+                case .began:
+                    lastArcballPoint = current
+                case .changed:
+                    if let previous = lastArcballPoint {
+                        camera.rotateArcball(from: previous, to: current)
+                    }
+                    lastArcballPoint = current
+                default:
+                    lastArcballPoint = nil
+                }
                 return
             }
 
@@ -360,6 +372,22 @@ struct BricksSceneView: UIViewRepresentable {
 
         private func scnVector(_ value: SIMD3<Double>) -> SCNVector3 {
             SCNVector3(Float(value.x), Float(value.y), Float(value.z))
+        }
+
+        private func arcballPoint(for point: CGPoint, viewSize: CGSize) -> SIMD3<Double> {
+            let scale = max(1, min(viewSize.width, viewSize.height))
+            var vector = SIMD3<Double>(
+                Double((2 * point.x - viewSize.width) / scale),
+                Double((viewSize.height - 2 * point.y) / scale),
+                0
+            )
+            let lengthSquared = vector.x * vector.x + vector.y * vector.y
+            if lengthSquared <= 1 {
+                vector.z = sqrt(1 - lengthSquared)
+            } else {
+                vector /= sqrt(lengthSquared)
+            }
+            return simd_normalize(vector)
         }
 
         private func nodeName(_ id: UUID) -> String { "brick_\(id.uuidString)" }
