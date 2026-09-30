@@ -34,7 +34,7 @@ enum WorldStateError: LocalizedError {
 
 @MainActor
 final class WorldState: ObservableObject {
-    static let supportedCellSizes: [Float] = [0.2, 0.1, 0.05, 0.025]
+    static let supportedCellSizes: [Float] = [0.2, 0.1, 0.05, 0.025, 0.0125]
 
     @Published private(set) var bricks: [UUID: Brick] = [:]
     @Published private(set) var cellSize: Float = 0.1
@@ -145,7 +145,7 @@ final class WorldState: ObservableObject {
     }
 
     @discardableResult
-    func setCellSize(_ newSize: Float) -> Bool {
+    func setCellSize(_ newSize: Float, recordsHistory: Bool = true) -> Bool {
         guard newSize > 0, abs(newSize - cellSize) > 0.000_001 else { return false }
         let previous = snapshot
         let scale = cellSize / newSize
@@ -175,9 +175,21 @@ final class WorldState: ObservableObject {
         cellSize = newSize
         bricks = Dictionary(uniqueKeysWithValues: resampled.map { ($0.id, $0) })
         occupied = proposedOccupancy
-        pushUndo(previous)
+        if recordsHistory { pushUndo(previous) }
         publishModelChange()
         return true
+    }
+
+    func refineForZoom(radius: Double) {
+        let desired: Float
+        switch radius {
+        case ..<0.35: desired = 0.0125
+        case ..<0.75: desired = 0.025
+        case ..<1.5: desired = 0.05
+        default: desired = 0.1
+        }
+        guard desired < cellSize else { return }
+        _ = setCellSize(desired, recordsHistory: false)
     }
 
     func save(to url: URL) throws {

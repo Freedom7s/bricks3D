@@ -16,30 +16,32 @@ final class EditorState: ObservableObject {
 
     @Published var interactionMode: InteractionMode = .camera
     @Published var selectedID: UUID?
-    @Published var defaultSize = SIMD3<Int>(2, 1, 4)
-    @Published var defaultColor = SIMD3<Float>(0.9, 0.4, 0.2)
 }
 
 @MainActor
 final class CameraState: ObservableObject {
-    @Published var center = SCNVector3Zero
-    @Published var radius: Float = 2.5
-    @Published var theta: Float = .pi / 6
-    @Published var phi: Float = .pi / 4
+    @Published var center = SIMD3<Double>(repeating: 0)
+    @Published var radius: Double = 2.5
+    @Published var theta: Double = .pi / 6
+    @Published var phi: Double = .pi / 4
 
-    func orbit(horizontal: Float, vertical: Float) {
+    func orbit(horizontal: Double, vertical: Double) {
         phi += horizontal
         theta = min(max(0.08, theta + vertical), .pi - 0.08)
     }
 
-    func zoom(by scale: Float) {
+    func zoom(by scale: Double) {
         radius = min(max(0.15, radius / scale), 100)
     }
 
-    func pan(screenX: Float, screenY: Float) {
+    func pan(screenX: Double, screenY: Double) {
         let distanceScale = radius * 0.0015
-        let right = SCNVector3(cos(phi), 0, -sin(phi))
-        let forward = SCNVector3(sin(phi), 0, cos(phi))
-        center = center + right * (-screenX * distanceScale) + forward * (screenY * distanceScale)
+        let right = SIMD3<Double>(sin(phi), 0, -cos(phi))
+        let up = SIMD3<Double>(
+            -cos(theta) * cos(phi),
+            sin(theta),
+            -cos(theta) * sin(phi)
+        )
+        center += right * (-screenX * distanceScale) + up * (screenY * distanceScale)
     }
 }

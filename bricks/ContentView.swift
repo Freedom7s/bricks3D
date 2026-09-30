@@ -6,18 +6,6 @@ struct ContentView: View {
     @StateObject private var camera = CameraState()
     @State private var message: String?
 
-    private let sizes = [
-        SIMD3<Int>(1, 1, 1),
-        SIMD3<Int>(2, 1, 2),
-        SIMD3<Int>(2, 1, 4),
-        SIMD3<Int>(2, 2, 2)
-    ]
-    private let colors = [
-        SIMD3<Float>(0.9, 0.4, 0.2),
-        SIMD3<Float>(0.2, 0.6, 0.9),
-        SIMD3<Float>(0.8, 0.8, 0.3)
-    ]
-
     var body: some View {
         ZStack(alignment: .top) {
             BricksSceneView(world: world, editor: editor, camera: camera)
@@ -70,21 +58,8 @@ struct ContentView: View {
             .disabled(!world.canRedo)
             .accessibilityLabel("重做")
 
-            Menu {
-                ForEach(WorldState.supportedCellSizes, id: \.self) { size in
-                    Button {
-                        world.setCellSize(size)
-                    } label: {
-                        if abs(world.cellSize - size) < 0.000_001 {
-                            Label(gridLabel(size), systemImage: "checkmark")
-                        } else {
-                            Text(gridLabel(size))
-                        }
-                    }
-                }
-            } label: {
-                Label(gridLabel(world.cellSize), systemImage: "grid")
-            }
+            Label(gridLabel(world.cellSize), systemImage: "grid")
+                .font(.caption)
 
             Menu {
                 Button("保存") { saveWorld() }
@@ -100,27 +75,11 @@ struct ContentView: View {
     }
 
     private var drawingToolbar: some View {
-        HStack(spacing: 6) {
-            Text("尺寸").font(.caption)
-            ForEach(sizes, id: \.self) { size in
-                Button("\(size.x)×\(size.y)×\(size.z)") { editor.defaultSize = size }
-                    .buttonStyle(.bordered)
-                    .tint(size == editor.defaultSize ? .blue : .gray)
-            }
-
-            Divider().frame(height: 24)
-
-            ForEach(colors, id: \.self) { color in
-                Button { editor.defaultColor = color } label: {
-                    Circle()
-                        .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
-                        .frame(width: 24, height: 24)
-                        .overlay(Circle().stroke(.white, lineWidth: color == editor.defaultColor ? 3 : 1))
-                }
-            }
-        }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        Label("单指滑动连续绘制单格体素", systemImage: "hand.draw")
+            .font(.caption)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
     }
 
     private func gridLabel(_ size: Float) -> String {
