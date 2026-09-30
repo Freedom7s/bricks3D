@@ -63,8 +63,30 @@ struct ContentView: View {
             .disabled(!world.canRedo)
             .accessibilityLabel("重做")
 
-            Label(gridLabel(Float(editor.visibleGridSizeMeters)), systemImage: "grid")
-                .font(.caption)
+            Menu {
+                Button {
+                    editor.brushSizeMode = .automatic
+                } label: {
+                    Label("自动", systemImage: editor.brushSizeMode == .automatic ? "checkmark" : "grid")
+                }
+                Divider()
+                ForEach(WorldState.supportedCellSizes, id: \.self) { size in
+                    Button {
+                        if size < world.cellSize {
+                            _ = world.setCellSize(size, recordsHistory: false)
+                        }
+                        editor.brushSizeMode = .fixed(Double(size))
+                    } label: {
+                        Label(
+                            gridLabel(size),
+                            systemImage: editor.brushSizeMode == .fixed(Double(size)) ? "checkmark" : "square.grid.3x3"
+                        )
+                    }
+                }
+            } label: {
+                Label(sizeMenuLabel, systemImage: "grid")
+                    .font(.caption)
+            }
 
             Menu {
                 Button("保存") { saveWorld() }
@@ -81,19 +103,16 @@ struct ContentView: View {
 
     private var drawingToolbar: some View {
         HStack(spacing: 10) {
-            Label("单指滑动绘制", systemImage: "hand.draw")
             Button {
-                editor.isBrushSizeLocked.toggle()
-                if editor.isBrushSizeLocked {
-                    editor.lockedBrushSizeMeters = editor.visibleGridSizeMeters
-                }
+                editor.drawingTool = editor.drawingTool == .brush ? .eraser : .brush
             } label: {
                 Label(
-                    editor.isBrushSizeLocked ? "大小锁定" : "跟随网格",
-                    systemImage: editor.isBrushSizeLocked ? "lock.fill" : "lock.open"
+                    editor.drawingTool == .brush ? "画笔" : "橡皮",
+                    systemImage: editor.drawingTool == .brush ? "pencil.tip" : "eraser.fill"
                 )
             }
             .buttonStyle(.bordered)
+            Text("单指滑动操作 · 双指双击切换工具")
         }
         .font(.caption)
         .padding(.horizontal, 12)
@@ -119,7 +138,19 @@ struct ContentView: View {
     }
 
     private func gridLabel(_ size: Float) -> String {
-        size >= 0.1 ? String(format: "%.0f cm", size * 100) : String(format: "%.1f cm", size * 100)
+        let centimeters = size * 100
+        if centimeters >= 10 { return String(format: "%.0f cm", centimeters) }
+        if centimeters >= 2.5 { return String(format: "%.1f cm", centimeters) }
+        return String(format: "%.2f cm", centimeters)
+    }
+
+    private var sizeMenuLabel: String {
+        switch editor.brushSizeMode {
+        case .automatic:
+            return "自动 · \(gridLabel(Float(editor.visibleGridSizeMeters)))"
+        case let .fixed(size):
+            return gridLabel(Float(size))
+        }
     }
 
     private func documentURL(_ name: String) -> URL {

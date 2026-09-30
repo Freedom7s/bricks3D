@@ -105,6 +105,34 @@ final class WorldState: ObservableObject {
         return true
     }
 
+    @discardableResult
+    func eraseCube(origin: SIMD3<Int>, size: Int) -> Bool {
+        guard size > 0 else { return false }
+        let eraseCells = Set(
+            (origin.x ..< origin.x + size).flatMap { x in
+                (origin.y ..< origin.y + size).flatMap { y in
+                    (origin.z ..< origin.z + size).map { z in SIMD3(x, y, z) }
+                }
+            }
+        )
+        let affectedIDs = Set(eraseCells.compactMap { occupied[$0] })
+        guard !affectedIDs.isEmpty else { return false }
+
+        recordUndoPoint()
+        var replacements: [Brick] = []
+        for id in affectedIDs {
+            guard let brick = bricks[id] else { continue }
+            removeFromOccupancy(id: id)
+            bricks.removeValue(forKey: id)
+            for cell in cells(of: brick) where !eraseCells.contains(cell) {
+                replacements.append(Brick(pos: cell, size: SIMD3(repeating: 1), color: brick.color))
+            }
+        }
+        for brick in replacements { insert(brick) }
+        publishModelChange()
+        return true
+    }
+
     func brick(atGrid grid: SIMD3<Int>) -> Brick? {
         guard let id = occupied[grid] else { return nil }
         return bricks[id]

@@ -14,10 +14,25 @@ final class EditorState: ObservableObject {
         var symbol: String { self == .camera ? "view.3d" : "pencil.tip" }
     }
 
+    enum DrawingTool {
+        case brush
+        case eraser
+    }
+
+    enum BrushSizeMode: Equatable {
+        case automatic
+        case fixed(Double)
+
+        var fixedSize: Double? {
+            if case let .fixed(size) = self { return size }
+            return nil
+        }
+    }
+
     @Published var interactionMode: InteractionMode = .camera
     @Published var selectedID: UUID?
-    @Published var isBrushSizeLocked = true
-    @Published var lockedBrushSizeMeters: Double = 0.1
+    @Published var drawingTool: DrawingTool = .brush
+    @Published var brushSizeMode: BrushSizeMode = .automatic
     @Published var visibleGridSizeMeters: Double = 0.1
 }
 
@@ -33,6 +48,10 @@ final class CameraState: ObservableObject {
         theta = min(max(0.08, theta + vertical), .pi / 2 - 0.04)
     }
 
+    func rotate(horizontal: Double) {
+        phi -= horizontal
+    }
+
     func zoom(by scale: Double) {
         radius = min(max(0.15, radius / scale), 100)
     }
@@ -41,6 +60,6 @@ final class CameraState: ObservableObject {
         let distanceScale = radius * 0.0015
         let right = SIMD3<Double>(sin(phi), 0, -cos(phi))
         let forward = SIMD3<Double>(-cos(phi), 0, -sin(phi))
-        center += right * (-screenX * distanceScale) + forward * (-screenY * distanceScale)
+        center += right * (-screenX * distanceScale) + forward * (screenY * distanceScale)
     }
 }
